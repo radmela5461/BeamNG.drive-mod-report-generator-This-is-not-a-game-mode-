@@ -1,357 +1,405 @@
-# BeamNG.drive-mod-report-generator-This-is-not-a-game-mode-
-BeamNG Mod Risk Report — Technical Implementation Details (Open Source)
-Overview
+BeamNG Mod Risk Report — Detailed Explanation (Open Source)
+1) What this tool is
 
-This document explains the internal architecture, execution flow, and technical implementation of the BeamNG Mod Risk Report script.
+BeamNG Mod Risk Report is a local, offline analysis tool written in Python that inspects BeamNG.drive mod archives (.zip files) and generates a human-readable TXT report.
 
-This script is written entirely in Python 3 and is designed to run locally on the user's machine. It performs static analysis of BeamNG.drive mod archives (.zip) and generates a detailed TXT report.
+It is designed to help you answer questions like:
 
-The script does not execute any mod code. It only inspects archive structure and metadata.
+“Which mods are most likely to cause performance drops (FPS loss, stutter, long loading)?”
 
-Execution model
+“Which mods are most likely to break textures/materials?”
 
-The script executes in a linear sequence of clearly defined phases:
+“Which mods conflict in critical areas (Lua/UI/core overrides) and may cause instability?”
 
-Environment initialization
+“Are there antivirus detections inside the folder I am scanning (Microsoft Defender on Windows)?”
 
-Folder preparation
+This tool does not modify BeamNG.drive, does not install mods, does not delete files, and does not upload your mods anywhere.
 
-Database initialization
+2) Language and platform
 
-Archive indexing
+Programming language: Python 3
 
-Risk score computation
+Runs on: Windows / Linux / macOS (core analysis)
 
-Conflict detection
+Antivirus scan feature: Windows only (uses Microsoft Defender via PowerShell)
 
-Material risk detection
+If you run it on Linux/macOS, the mod analysis still works, but the Defender scan is automatically skipped.
 
-Antivirus scan (Windows only)
+3) Why this exists (the problem it solves)
 
-Report generation
+BeamNG.drive mods are usually distributed as ZIP archives. Many mods can coexist peacefully, but some cause:
 
-Each phase is deterministic and reproducible.
+Performance issues: heavy textures, huge meshes, excessive scripts, massive file counts
 
-Folder structure logic
+Visual issues: broken textures, incorrect materials, pink/white surfaces, missing textures
 
-The script automatically creates and uses the following folders:
+Conflicts: one mod silently overrides files from another mod, especially in critical directories
 
-(mod test)
-long/
-  log/
-    beamng_report_TIMESTAMP.txt
+This tool analyzes mod ZIP contents without extracting them, identifies suspicious patterns, and produces a report you can share with others or use for troubleshooting.
 
+4) What this tool does (high-level)
 
-Purpose:
+When you run the script, it performs these actions in order:
+
+Creates required folders (if missing):
 
 mod test
-Input folder containing BeamNG mod ZIP files.
 
 long/log
-Output folder containing generated reports.
 
-perf_index.db
-Temporary SQLite database used internally during analysis.
+Reads every .zip file inside mod test
 
-The script ensures these folders exist before continuing.
+Indexes each ZIP archive’s internal file list into a local SQLite database (stored locally)
 
-Archive indexing phase
+Calculates “risk scores” for mods based on:
 
-Each ZIP file inside mod test is opened using Python’s standard library:
+total size
 
-zipfile.ZipFile()
+texture size
 
-
-Important behavior:
-
-The script does NOT extract ZIP files.
-
-It only reads ZIP metadata entries.
-
-For each ZIP entry, the script records:
-
-mod name (ZIP filename)
-
-internal file path
-
-file size in bytes
-
-file extension
-
-classification bucket
-
-critical override flag
-
-material definition flag
-
-These values are stored in a local SQLite database.
-
-SQLite database purpose
-
-SQLite is used to:
-
-handle large numbers of mods efficiently
-
-avoid excessive memory usage
-
-allow fast conflict detection queries
-
-Database location:
-
-long/perf_index.db
-
-
-This database is recreated each run.
-
-No external database is used.
-
-No network communication occurs.
-
-File classification system
-
-Each file inside a ZIP archive is categorized based on extension and path.
-
-Examples:
-
-Texture files:
-
-.dds
-.png
-.jpg
-.jpeg
-.tga
-.bmp
-
-
-Mesh files:
-
-.dae
-.fbx
-.obj
-.gltf
-.glb
-
-
-Script files:
-
-.lua
-
-
-Material definition files:
-
-materials.cs
-materials.json
-materials/*
-
-
-Critical override paths:
-
-core/
-ui/
-lua/
-scripts/
-vehicles/common/
-
-
-These paths are known high-risk override locations in BeamNG.drive.
-
-Risk scoring algorithm
-
-Each mod receives a numerical score.
-
-Score is calculated using weighted heuristics:
-
-Signal inputs include:
-
-Total archive size
-
-Texture size
-
-Mesh size
+mesh size
 
 Lua/script size
 
-Total file count
+file count
 
-Material definitions present
+presence of special directories known to be conflict-prone
 
-Presence in override-sensitive directories
+Detects critical conflicts between mods (only in important override areas)
 
-Higher scores indicate higher likelihood of:
+Detects texture/material break candidates (mods likely to cause visual issues)
 
-performance impact
+On Windows: optionally performs a Microsoft Defender scan of the mod test folder
+
+Writes a detailed TXT report to:
+
+long/log/beamng_report_YYYY-MM-DD_HH-MM-SS.txt
+
+5) What the tool DOES NOT do (important trust section)
+
+This tool:
+
+Does not download anything
+
+Does not connect to the internet
+
+Does not send your mods, file names, or any data to any server
+
+Does not install or remove mods
+
+Does not change your BeamNG files
+
+Does not modify ZIP archives
+
+Does not run any code inside the mods
+
+It only reads file names and sizes from ZIP metadata and uses those to compute risk signals.
+
+6) How the analysis works internally (detailed)
+6.1 ZIP inspection (no extraction required)
+
+BeamNG mods come as .zip. This tool uses Python’s built-in ZIP support to read:
+
+internal file paths (example: vehicles/carname/carname.jbeam)
+
+internal file sizes
+
+No extraction is required. That means:
+
+no temporary mod files are created
+
+no mod content is executed
+
+the scan is fast and safe
+
+6.2 Normalization (how file paths are compared)
+
+Operating systems can vary in path formatting. The tool normalizes every ZIP entry:
+
+converts backslashes to forward slashes
+
+removes leading slashes
+
+converts to lowercase
+
+This increases reliability when comparing conflicts across mods.
+
+6.3 Local SQLite indexing (why it exists)
+
+Instead of storing everything in RAM (which can crash with hundreds/thousands of mods), the tool stores indexed entries in a local SQLite database:
+
+file: long/perf_index.db
+
+this database is created fresh each run
+
+SQLite is used because it is:
+
+local-only
+
+reliable
+
+fast
+
+included with Python by default (no extra install)
+
+6.4 Risk scoring (how “Top Risk Mods” are calculated)
+
+The tool computes a numeric score per mod using multiple signals:
+
+Total ZIP content size (bigger mods can load slower)
+
+Texture size (.dds, .png, .jpg, etc.)
+
+large texture sets often cause VRAM pressure and stutter
+
+Mesh size (.dae, .fbx, .gltf, etc.)
+
+large geometry can affect GPU load and memory usage
+
+Lua/script size (.lua)
+
+scripts can increase CPU usage or cause errors
+
+File count
+
+huge file counts can slow down scanning/loading phases
+
+“Hotspot directory bonuses”
+
+presence of directories that commonly cause conflicts:
+
+core/
+
+ui/
+
+lua/
+
+scripts/
+
+vehicles/common/
+
+mods touching these areas have higher risk because they override common/shared game logic
+
+Important note:
+
+This is a heuristic risk ranking. It does not guarantee a mod is bad.
+
+It is a practical signal to help you narrow down candidates quickly.
+
+6.5 Critical conflict detection (what is a “critical conflict”?)
+
+Many mods “conflict” in harmless ways (example: two mods include their own unrelated files).
+This tool focuses on conflicts that are more likely to cause actual issues.
+
+A critical conflict is detected when two different mods contain the same internal file path inside these areas:
+
+core/
+
+ui/
+
+lua/
+
+scripts/
+
+vehicles/common/
+
+material definition files like materials.cs / materials.json
+
+If two mods include the exact same file path in those areas, one can override the other depending on load order, causing:
 
 instability
 
-visual issues
+broken UI/apps
 
-conflict risk
-
-This score is a heuristic indicator, not a definitive classification.
-
-Conflict detection algorithm
-
-Conflict detection uses SQLite queries to find file path collisions.
-
-Two mods are considered in conflict if:
-
-modA/filepath == modB/filepath
-
-
-AND the file resides in a critical override location.
-
-Example:
-
-core/vehicleManager.lua
-
-
-If two mods include this path, one will override the other.
-
-This can cause:
-
-script malfunction
+script errors
 
 unexpected behavior
 
-instability
+sometimes performance problems due to repeated script hooks or broken assets
 
-The script lists these mod pairs in the report.
+The report lists these mod pairs under Critical Conflict Pairs.
 
-Material risk detection logic
+6.6 Texture/material break detection (what it checks)
 
-Material definition files control texture assignments and shaders.
+“Texture breaking” in BeamNG is commonly caused by:
 
-Conflicts in these files often cause:
+material definition overrides (materials.cs, materials.json, or files inside materials/)
+
+collisions on shared texture paths (same .dds path used by multiple mods)
+
+This tool flags mods as “Texture/Material Break Risk” if they contain material definition files.
+These are the most frequent root cause of:
+
+pink/white textures
 
 missing textures
 
-incorrect textures
+wrong reflections
 
-broken reflections
+incorrect shaders/material properties
 
-visual artifacts
+The report lists these mods under Texture/Material Break Risk Mods.
 
-The script flags mods containing material definitions and assigns additional risk weight.
+7) Antivirus scanning (how it works, and what it means)
 
-Antivirus integration logic (Windows only)
+7.1 Windows only (Microsoft Defender)
 
-Antivirus scanning is performed using Microsoft Defender.
+On Windows systems, the tool can run a Microsoft Defender Custom Scan on the mod test folder using PowerShell.
 
-This is executed via PowerShell command invocation:
+It does not install an antivirus. It uses what Windows already provides.
 
-Start-MpScan -ScanType CustomScan -ScanPath <folder>
+7.2 What gets reported
 
+In the TXT report you’ll see:
 
-Threat detection results are retrieved using:
+AV Scan Results
 
-Get-MpThreatDetection
+Status: ok/error/unsupported
 
+Detections: N
 
-Only entries referencing the scanned folder are included in the report.
+For each detection:
 
-The script does not modify antivirus configuration.
+Threat name
 
-The script does not disable antivirus protections.
+Detection time
 
-It only initiates a scan and reads detection logs.
+File path(s) reported by Defender
 
-Report generation system
+7.3 If Defender is disabled or blocked
 
-The final TXT report is generated using Python file I/O:
+Some systems may block Defender commands or PowerShell policies.
 
-open(report_path, "w", encoding="utf-8")
+In that case:
 
+the script still completes
+
+the report shows Status: error and prints the error text (if available)
+
+8) What the TXT report contains
+
+Every generated report is saved to:
+
+long/log/beamng_report_YYYY-MM-DD_HH-MM-SS.txt
 
 The report includes:
 
-scan summary
+General summary
 
-antivirus results
+total scanned zips
 
-ranked mod risk scores
+skipped/bad zips
 
-conflict pairs
+total number of critical conflict pairs
 
-texture/material risk mods
+AV Scan Results
 
-Reports are timestamped to prevent overwriting.
+whether antivirus scan ran
 
-Security model
+number of detections
 
-This script operates entirely locally.
+details (if any)
 
-It does not:
+Top Risk Mods
 
-connect to external servers
+ranked list of mods with a risk score
 
-transmit data
+includes approximate sizes (total/tex/mesh/lua) and file counts
 
-download files
+Critical Conflict Pairs
 
-execute mod code
+mod A <-> mod B
 
-modify mod archives
+number of critical overlapping file paths
 
-It performs read-only inspection of ZIP metadata.
+Texture/Material Break Risk Mods
 
-Cross-platform behavior
+mods likely to affect materials/textures
 
-Fully supported platforms:
+9) What the user must do (step-by-step)
+Requirements
 
-Windows
-Linux
-macOS
+Python 3 installed
 
-Antivirus scan feature is available only on Windows due to Microsoft Defender integration.
+Setup
 
-Core analysis works identically on all platforms.
+Put the script file in a folder you want to use.
 
-Dependencies
+Run it once (it will create folders automatically).
 
-Only Python standard library modules are used:
+Copy BeamNG mod .zip files into:
 
-os
-zipfile
-sqlite3
-subprocess
-json
-time
-datetime
-pathlib
+mod test
 
+Run
 
-No external libraries are required.
+On Windows:
 
-No pip installation required.
+Double-click the .py file
 
-Transparency and reproducibility
+or run from CMD:
 
-Because this tool is fully open source:
+python beamng_mod_risk_report.py
 
-All logic is visible
+On Linux/macOS:
 
-All operations are inspectable
+python3 beamng_mod_risk_report.py
 
-All outputs are deterministic
+Output
 
-Anyone can verify functionality
+After it finishes, open:
 
-This ensures maximum transparency and trust.
+long/log/beamng_report_*.txt
 
-Summary
+The console stays open until you press Enter, so you can see the progress steps.
 
-This script is a deterministic, read-only, open-source analysis tool designed to inspect BeamNG mod archives and generate a clear diagnostic report.
+10) Privacy and security
 
-It provides insight into:
+This tool is designed for trust:
 
-performance risk
+It runs locally.
 
-conflict risk
+It does not call any web APIs.
 
-material risk
+It does not upload your mods.
 
-antivirus detections
+It reads ZIP metadata (names/sizes) only.
 
-All analysis is performed locally.
+Antivirus scanning uses Windows Defender on your machine.
 
-No external systems are involved.
+11) Open Source statement (very important)
+
+This project is 100% open source.
+
+That means:
+
+You can inspect the entire code.
+
+You can modify it.
+
+You can build your own version.
+
+You can verify what it does and does not do.
+
+There are no hidden components, no remote services, and no obfuscated binaries.
+
+If you are distributing this tool, it is recommended to distribute:
+
+the .py source file
+
+this README text
+
+optionally a hash (SHA256) so others can verify the file has not been modified
+
+12) Practical interpretation tips
+
+A mod appearing in “Top Risk Mods” does not automatically mean it is “bad”.
+It means it is “heavy” or “conflict-prone”, so it is a strong candidate if you have FPS drops.
+
+If your game has visual glitches:
+check “Texture/Material Break Risk Mods” first.
+
+If your game has UI/app/script issues:
+check “Critical Conflict Pairs” first.
+
+If you want, I can also write a short version of this README for people who hate long documents—while keeping this detailed one for those who want full transparency.
