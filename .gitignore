@@ -1,207 +1,386 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+import os
+import zipfile
+import sqlite3
+import subprocess
+import json
+import time
+from datetime import datetime
 
-# C extensions
-*.so
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MOD_TEST_DIR = os.path.join(BASE_DIR, "mod test")
+LONG_DIR = os.path.join(BASE_DIR, "long")
+LOG_DIR = os.path.join(LONG_DIR, "log")
+DB_PATH = os.path.join(LONG_DIR, "perf_index.db")
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+TOP_MODS = 25
+TOP_PAIRS = 25
+TOP_TEX_BREAK = 25
+TOP_AV_HITS = 50
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+SLOW_MS = 40
+VERBOSE_FILES = 0
+MAX_VERBOSE_FILES_PER_ZIP = 60
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+W_TOTAL_MB = 0.15
+W_TEX_MB = 0.55
+W_MESH_MB = 0.35
+W_LUA_KB = 0.18
+W_FILECOUNT = 0.004
+W_MAP_BONUS = 18.0
+W_UI_BONUS = 10.0
+W_CORE_BONUS = 35.0
+W_COMMON_VEH_BONUS = 14.0
+W_MATERIAL_FILE_BONUS = 22.0
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
+TEX_EXT = {".dds",".png",".jpg",".jpeg",".tga",".bmp"}
+MESH_EXT = {".dae",".obj",".fbx",".gltf",".glb"}
+LUA_EXT = {".lua"}
+SOUND_EXT = {".wav",".ogg",".mp3"}
 
-# Translations
-*.mo
-*.pot
+CRITICAL_PREFIXES = ("lua/","scripts/","ui/","core/","vehicles/common/")
+MATERIAL_FILENAMES = ("materials.cs","materials.json")
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+def pause():
+    if SLOW_MS and SLOW_MS > 0:
+        time.sleep(SLOW_MS / 1000.0)
 
-# Flask stuff:
-instance/
-.webassets-cache
+def banner():
+    print("="*72)
+    print("BeamNG Mod Risk Report (Python)")
+    print("Output: long\\log\\beamng_report_*.txt")
+    print("="*72)
 
-# Scrapy stuff:
-.scrapy
+def ensure_dirs():
+    os.makedirs(MOD_TEST_DIR, exist_ok=True)
+    os.makedirs(LONG_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
 
-# Sphinx documentation
-docs/_build/
+def norm(p):
+    p = p.replace("\\","/").strip().lower()
+    while p.startswith("/"):
+        p = p[1:]
+    return p
 
-# PyBuilder
-.pybuilder/
-target/
+def ext_of(p):
+    return os.path.splitext(p)[1].lower()
 
-# Jupyter Notebook
-.ipynb_checkpoints
+def bucket_for(path, ext):
+    if ext in TEX_EXT: return "tex"
+    if ext in MESH_EXT: return "mesh"
+    if ext in LUA_EXT: return "lua"
+    if ext in SOUND_EXT: return "sound"
+    if path.startswith("levels/"): return "map"
+    return "other"
 
-# IPython
-profile_default/
-ipython_config.py
+def is_material_file(path):
+    base = os.path.basename(path)
+    if base in MATERIAL_FILENAMES: return 1
+    if "materials/" in path: return 1
+    return 0
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DROP TABLE IF EXISTS files")
+    c.execute("CREATE TABLE files(mod TEXT, filepath TEXT, size INTEGER, ext TEXT, bucket TEXT, is_critical INTEGER, is_material INTEGER)")
+    c.execute("CREATE INDEX idx_mod ON files(mod)")
+    c.execute("CREATE INDEX idx_path ON files(filepath)")
+    conn.commit()
+    return conn
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
+def scan_to_db(conn):
+    zips = sorted([f for f in os.listdir(MOD_TEST_DIR) if f.lower().endswith(".zip")])
+    bad = []
+    total = len(zips)
+    if total == 0:
+        return [], []
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
+    print(f"[1/6] Found {total} zip(s) in: {MOD_TEST_DIR}")
+    pause()
+    print("[2/6] Indexing zip contents...")
+    pause()
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-#poetry.toml
+    c = conn.cursor()
+    for i, zname in enumerate(zips, 1):
+        zpath = os.path.join(MOD_TEST_DIR, zname)
+        print(f"  [{i}/{total}] Opening: {zname}")
+        pause()
+        try:
+            with zipfile.ZipFile(zpath, "r") as z:
+                infos = z.infolist()
+                print(f"        Entries: {len(infos)}")
+                pause()
+                rows = []
+                shown = 0
+                for info in infos:
+                    if info.is_dir():
+                        continue
+                    fp = norm(info.filename)
+                    if not fp:
+                        continue
+                    ex = ext_of(fp)
+                    b = bucket_for(fp, ex)
+                    mat = is_material_file(fp)
+                    crit = 1 if (mat or any(fp.startswith(p) for p in CRITICAL_PREFIXES)) else 0
+                    rows.append((zname, fp, int(info.file_size), ex, b, crit, mat))
+                    if VERBOSE_FILES and shown < MAX_VERBOSE_FILES_PER_ZIP:
+                        print(f"        file: {fp} | {info.file_size} bytes")
+                        shown += 1
+                        pause()
+                c.executemany("INSERT INTO files VALUES (?,?,?,?,?,?,?)", rows)
+                print(f"        Indexed files: {len(rows)}")
+                pause()
+            if i % 5 == 0 or i == total:
+                conn.commit()
+                print("        DB commit")
+                pause()
+        except Exception as e:
+            bad.append(zname)
+            print(f"        Skipped: {zname} ({type(e).__name__})")
+            pause()
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-#pdm.lock
-#pdm.toml
-.pdm-python
-.pdm-build/
+    conn.commit()
+    print(f"[2/6] Done. Skipped bad zips: {len(bad)}")
+    pause()
+    return zips, bad
 
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-#pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
+def has_prefix(conn, mod, prefix):
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM files WHERE mod=? AND filepath LIKE ? LIMIT 1", (mod, prefix + "%"))
+    return c.fetchone() is not None
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+def compute_mod_scores(conn):
+    print("[3/6] Computing mod risk scores...")
+    pause()
+    c = conn.cursor()
+    c.execute("""SELECT mod,
+    SUM(size),
+    SUM(CASE WHEN bucket='tex' THEN size ELSE 0 END),
+    SUM(CASE WHEN bucket='mesh' THEN size ELSE 0 END),
+    SUM(CASE WHEN bucket='lua' THEN size ELSE 0 END),
+    COUNT(*),
+    SUM(is_material)
+    FROM files GROUP BY mod""")
+    rows = c.fetchall()
+    print(f"        Mods indexed: {len(rows)}")
+    pause()
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+    mod_metrics = {}
+    mod_score = {}
+    for idx, (mod, total, tex, mesh, lua, fcnt, matcnt) in enumerate(rows, 1):
+        total_mb = (total or 0) / (1024 * 1024)
+        tex_mb = (tex or 0) / (1024 * 1024)
+        mesh_mb = (mesh or 0) / (1024 * 1024)
+        lua_kb = (lua or 0) / 1024
+        score = 0.0
+        score += total_mb * W_TOTAL_MB
+        score += tex_mb * W_TEX_MB
+        score += mesh_mb * W_MESH_MB
+        score += (lua_kb * W_LUA_KB) / 1024
+        score += fcnt * W_FILECOUNT
+        if has_prefix(conn, mod, "levels/"): score += W_MAP_BONUS
+        if has_prefix(conn, mod, "ui/"): score += W_UI_BONUS
+        if has_prefix(conn, mod, "core/"): score += W_CORE_BONUS
+        if has_prefix(conn, mod, "vehicles/common/"): score += W_COMMON_VEH_BONUS
+        if matcnt: score += W_MATERIAL_FILE_BONUS
 
-# SageMath parsed files
-*.sage.py
+        mod_metrics[mod] = {
+            "total_mb": float(total_mb),
+            "tex_mb": float(tex_mb),
+            "mesh_mb": float(mesh_mb),
+            "lua_kb": float(lua_kb),
+            "file_count": int(fcnt),
+            "material_file_count": int(matcnt or 0),
+        }
+        mod_score[mod] = float(score)
 
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+        if idx % 50 == 0:
+            print(f"        Scored mods: {idx}/{len(rows)}")
+            pause()
 
-# Spyder project settings
-.spyderproject
-.spyproject
+    print("[3/6] Done.")
+    pause()
+    return mod_metrics, mod_score
 
-# Rope project settings
-.ropeproject
+def compute_pairs(conn):
+    print("[4/6] Computing critical conflict pairs...")
+    pause()
+    c = conn.cursor()
+    c.execute(f"""SELECT a.mod,b.mod,COUNT(*) FROM files a JOIN files b
+    ON a.filepath=b.filepath AND a.mod<b.mod
+    WHERE a.is_critical=1 AND b.is_critical=1
+    GROUP BY a.mod,b.mod ORDER BY COUNT(*) DESC LIMIT {TOP_PAIRS}""")
+    pairs = c.fetchall()
+    c.execute("""SELECT COUNT(*) FROM (
+    SELECT a.mod,b.mod FROM files a JOIN files b
+    ON a.filepath=b.filepath AND a.mod<b.mod
+    WHERE a.is_critical=1 AND b.is_critical=1 GROUP BY a.mod,b.mod)""")
+    total = c.fetchone()[0] or 0
+    print(f"[4/6] Done. Total critical conflict pairs: {int(total)}")
+    pause()
+    return int(total), pairs
 
-# mkdocs documentation
-/site
+def compute_texture_break(conn, mod_score):
+    print("[5/6] Computing texture/material break candidates...")
+    pause()
+    c = conn.cursor()
+    c.execute("SELECT mod,SUM(is_material) FROM files GROUP BY mod")
+    matcount = dict(c.fetchall())
+    scores = []
+    for mod, base in mod_score.items():
+        m = int(matcount.get(mod, 0) or 0)
+        if m > 0:
+            s = float(base) + W_MATERIAL_FILE_BONUS + (m * 0.35)
+            scores.append((mod, s, m))
+    scores.sort(key=lambda x: (-x[1], x[0]))
+    print(f"[5/6] Done. Candidates: {len(scores)}")
+    pause()
+    return scores[:TOP_TEX_BREAK]
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+def defender_scan(path_to_scan):
+    print("[6/6] Antivirus scan (Microsoft Defender) starting...")
+    print(f"      Target: {path_to_scan}")
+    pause()
 
-# Pyre type checker
-.pyre/
+    if os.name != "nt":
+        print("      AV scan skipped (non-Windows).")
+        pause()
+        return {"status": "unsupported", "hits": [], "raw": ""}
 
-# pytype static type analyzer
-.pytype/
+    ps = r"""
+$ErrorActionPreference = 'Stop'
+$p = $args[0]
+$null = Start-MpScan -ScanType CustomScan -ScanPath $p
+$d = Get-MpThreatDetection | Select-Object ThreatName,Resources,InitialDetectionTime
+$d | ConvertTo-Json -Compress
+"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps, path_to_scan],
+            capture_output=True,
+            text=True,
+            timeout=60*30
+        )
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        hits = []
+        if out:
+            try:
+                data = json.loads(out)
+                if isinstance(data, dict):
+                    data = [data]
+                if isinstance(data, list):
+                    pnorm = os.path.normcase(os.path.abspath(path_to_scan))
+                    for item in data:
+                        tn = str(item.get("ThreatName", "")).strip()
+                        rs = item.get("Resources", "")
+                        if isinstance(rs, list):
+                            rs_list = [str(x) for x in rs]
+                        else:
+                            rs_list = [str(rs)] if rs else []
+                        rs_list2 = []
+                        for x in rs_list:
+                            s = str(x).strip().strip('"')
+                            try:
+                                ax = os.path.normcase(os.path.abspath(s))
+                            except:
+                                ax = s
+                            if str(ax).find(pnorm) != -1:
+                                rs_list2.append(s)
+                        t = str(item.get("InitialDetectionTime", "")).strip()
+                        if rs_list2:
+                            hits.append({"ThreatName": tn, "Resources": rs_list2, "Time": t})
+            except:
+                pass
+        status = "ok" if r.returncode == 0 else "error"
+        raw = (err[:4000] if err else "")
+        print(f"      AV status: {status}")
+        print(f"      Detections: {len(hits)}")
+        pause()
+        return {"status": status, "hits": hits[:TOP_AV_HITS], "raw": raw}
+    except Exception as e:
+        print("      AV scan error:", type(e).__name__)
+        pause()
+        return {"status": "error", "hits": [], "raw": str(e)[:4000]}
 
-# Cython debug symbols
-cython_debug/
+def write_report(zips, bad, mod_metrics, mod_score, pair_total, pairs, texbreak, avres):
+    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    report = os.path.join(LOG_DIR, f"beamng_report_{now}.txt")
+    with open(report, "w", encoding="utf-8") as f:
+        f.write("BeamNG.drive Risk Report\n")
+        f.write(f"Date: {datetime.now().isoformat(sep=' ', timespec='seconds')}\n\n")
+        f.write(f"Scanned zips: {len(zips)}\n")
+        f.write(f"Skipped bad zips: {len(bad)}\n")
+        f.write(f"Critical conflict pairs: {pair_total}\n\n")
 
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+        f.write("AV Scan Results\n")
+        f.write(f"Status: {avres.get('status','')}\n")
+        hits = avres.get("hits", [])
+        f.write(f"Detections: {len(hits)}\n")
+        if hits:
+            for i, h in enumerate(hits, 1):
+                tn = h.get("ThreatName","")
+                tm = h.get("Time","")
+                rs = h.get("Resources", [])
+                f.write(f"{i}. {tn} | {tm}\n")
+                for r in rs[:10]:
+                    f.write(f"   {r}\n")
+        else:
+            raw = avres.get("raw","")
+            if raw:
+                f.write(raw + "\n")
+        f.write("\n")
 
-# Abstra
-# Abstra is an AI-powered process automation framework.
-# Ignore directories containing user credentials, local state, and settings.
-# Learn more at https://abstra.io/docs
-.abstra/
+        f.write("Top Risk Mods\n")
+        top = sorted(mod_score.items(), key=lambda x: (-x[1], x[0]))[:TOP_MODS]
+        for i, (mod, score) in enumerate(top, 1):
+            met = mod_metrics.get(mod, {})
+            f.write(f"{i}. {mod} | score {score:.1f} | total {met.get('total_mb',0):.0f}MB | tex {met.get('tex_mb',0):.0f}MB | mesh {met.get('mesh_mb',0):.0f}MB | lua {met.get('lua_kb',0):.0f}KB | files {met.get('file_count',0)}\n")
+        f.write("\n")
 
-# Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#  you could uncomment the following to ignore the entire vscode folder
-# .vscode/
+        f.write("Critical Conflict Pairs\n")
+        for i, (a, b, cnt) in enumerate(pairs, 1):
+            f.write(f"{i}. {a} <-> {b} | {cnt}\n")
+        f.write("\n")
 
-# Ruff stuff:
-.ruff_cache/
+        f.write("Texture/Material Break Risk Mods\n")
+        for i, (mod, score, mcnt) in enumerate(texbreak, 1):
+            f.write(f"{i}. {mod} | score {score:.1f} | material_files {mcnt}\n")
+    return report
 
-# PyPI configuration file
-.pypirc
+def main():
+    banner()
+    ensure_dirs()
+    print("Working directory:", BASE_DIR)
+    print("Mod folder:", MOD_TEST_DIR)
+    print("Log folder:", LOG_DIR)
+    print("Slow mode:", f"{SLOW_MS}ms" if SLOW_MS else "off")
+    print("Verbose files:", "on" if VERBOSE_FILES else "off")
+    print()
 
-# Cursor
-#  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
-#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
-#  refer to https://docs.cursor.com/context/ignore-files
-.cursorignore
-.cursorindexingignore
+    print("Preparing database...")
+    pause()
+    conn = init_db()
+    print("Database ready:", DB_PATH)
+    pause()
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+    zips, bad = scan_to_db(conn)
+    if not zips:
+        print("No zip mods found in 'mod test'.")
+        input("Press Enter to exit...")
+        return
+
+    mod_metrics, mod_score = compute_mod_scores(conn)
+    pair_total, pairs = compute_pairs(conn)
+    texbreak = compute_texture_break(conn, mod_score)
+    avres = defender_scan(MOD_TEST_DIR)
+
+    print("Writing report...")
+    pause()
+    report = write_report(zips, bad, mod_metrics, mod_score, pair_total, pairs, texbreak, avres)
+    print("Report saved:", report)
+    print()
+    input("Press Enter to exit...")
+
+if __name__ == "__main__":
+    main()
